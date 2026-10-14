@@ -6,7 +6,7 @@ use cloud_sync::paths::AppPaths;
 use cloud_sync::repository;
 use cloud_sync::session;
 use cloud_sync::state::AppState;
-use cloud_sync::{conflict, daemon, recovery, updater};
+use cloud_sync::{conflict, daemon, recovery, status, theme, updater};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +30,8 @@ enum Commands {
     List,
     Status {
         repository: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     Sync {
         repository: String,
@@ -83,9 +85,20 @@ enum Commands {
         #[command(subcommand)]
         command: UpdateCommands,
     },
+    Theme {
+        #[command(subcommand)]
+        command: ThemeCommands,
+    },
     ConfigPath,
     Daemon,
     InstallService,
+}
+
+#[derive(Subcommand)]
+enum ThemeCommands {
+    List,
+    Get,
+    Set { name: String },
 }
 
 #[derive(Subcommand)]
@@ -180,7 +193,15 @@ fn run() -> Result<()> {
         }
         Commands::Status {
             repository: selector,
-        } => status(&config, &paths, selector.as_deref())?,
+            json,
+        } => {
+            if json {
+                let summary = status::summary(&config, &paths)?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                print_status(&config, &paths, selector.as_deref())?;
+            }
+        }
         Commands::Sync {
             repository: selector,
         } => {
@@ -366,6 +387,29 @@ fn run() -> Result<()> {
                 None => println!("cloud-sync is already up to date"),
             },
         },
+        Commands::Theme { command } => match command {
+            ThemeCommands::List => {
+                let theme_config = theme::ThemeConfig::load(&paths)?;
+                for name in theme_config.list_names() {
+                    let marker = if name == theme_config.active {
+                        " (active)"
+                    } else {
+                        ""
+                    };
+                    println!("{name}{marker}");
+                }
+            }
+            ThemeCommands::Get => {
+                let theme_config = theme::ThemeConfig::load(&paths)?;
+                println!("{}", theme_config.active);
+            }
+            ThemeCommands::Set { name } => {
+                let mut theme_config = theme::ThemeConfig::load(&paths)?;
+                theme_config.set_active(&name)?;
+                theme_config.save(&paths)?;
+                println!("theme set to {name}");
+            }
+        },
         Commands::ConfigPath => println!("{}", paths.config_file.display()),
         Commands::Daemon => daemon::run(config, paths)?,
         Commands::InstallService => install_service()?,
@@ -419,7 +463,7 @@ fn finalize_all(config: &Config, paths: &AppPaths) -> Result<()> {
     }
 }
 
-fn status(config: &Config, paths: &AppPaths, selector: Option<&str>) -> Result<()> {
+fn print_status(config: &Config, paths: &AppPaths, selector: Option<&str>) -> Result<()> {
     let state = AppState::load(paths)?;
     for repo in &config.repositories {
         if selector.is_some_and(|value| value != repo.id && Path::new(value) != repo.path) {

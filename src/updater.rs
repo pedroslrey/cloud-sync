@@ -18,6 +18,8 @@ pub struct UpdateInfo {
     pub tag: String,
     binary_url: String,
     checksum_url: String,
+    gui_binary_url: Option<String>,
+    gui_checksum_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +115,47 @@ pub fn install(info: &UpdateInfo, paths: &AppPaths) -> Result<PathBuf> {
             ))),
         };
     }
+    if let Err(error) = install_gui(info, paths) {
+        eprintln!("warning: cloud-sync-gui update failed: {error:#}");
+    }
     Ok(installed)
+}
+
+/// Update the optional `cloud-sync-gui` binary if it is installed and the
+/// release contains a matching asset. Returns the installed path, or None
+/// when the GUI is not installed or the release has no GUI asset.
+pub fn install_gui(info: &UpdateInfo, paths: &AppPaths) -> Result<Option<PathBuf>> {
+    let (Some(binary_url), Some(checksum_url)) = (&info.gui_binary_url, &info.gui_checksum_url)
+    else {
+        return Ok(None);
+    };
+    validate_release_url(binary_url)?;
+    validate_release_url(checksum_url)?;
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    let binary_dir = PathBuf::from(home).join(".local/bin");
+    let installed = binary_dir.join("cloud-sync-gui");
+    if !installed.exists() {
+        return Ok(None);
+    }
+    paths.ensure()?;
+    let update_dir = paths
+        .state_dir
+        .join("updates")
+        .join(info.available.to_string());
+    fs::create_dir_all(&update_dir)?;
+    let candidate = update_dir.join(gui_asset_name());
+    let checksum = update_dir.join(format!("{}.sha256", gui_asset_name()));
+    download(binary_url, &candidate)?;
+    download(checksum_url, &checksum)?;
+    verify_checksum(&candidate, &checksum)?;
+    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))?;
+    let previous = binary_dir.join("cloud-sync-gui.previous");
+    let replacement = binary_dir.join("cloud-sync-gui.new");
+    fs::copy(&installed, &previous).context("could not back up installed GUI binary")?;
+    fs::copy(&candidate, &replacement).context("could not stage GUI update")?;
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))?;
+    fs::rename(&replacement, &installed).context("could not activate GUI update")?;
+    Ok(Some(installed))
 }
 
 pub fn notify_available(info: &UpdateInfo) {
@@ -147,32 +189,55 @@ fn parse_release(bytes: &[u8]) -> Result<Option<UpdateInfo>> {
     }
     let asset = asset_name()?;
     let checksum = format!("{asset}.sha256");
-    let binary_url = release
-        .assets
-        .iter()
-        .find(|candidate| candidate.name == asset)
-        .map(|candidate| candidate.browser_download_url.clone())
-        .with_context(|| format!("release {} does not contain {asset}", release.tag_name))?;
-    let checksum_url = release
-        .assets
-        .iter()
-        .find(|candidate| candidate.name == checksum)
-        .map(|candidate| candidate.browser_download_url.clone())
-        .with_context(|| format!("release {} does not contain {checksum}", release.tag_name))?;
+    let binary_url = find_asset(&release, asset)?;
+    let checksum_url = find_asset(&release, &checksum)?;
+    let gui_asset = gui_asset_name();
+    let gui_checksum = format!("{gui_asset}.sha256");
+    let gui_binary_url = find_asset_optional(&release, gui_asset);
+    let gui_checksum_url = find_asset_optional(&release, &gui_checksum);
     validate_release_url(&binary_url)?;
     validate_release_url(&checksum_url)?;
+    if let Some(url) = &gui_binary_url {
+        validate_release_url(url)?;
+    }
+    if let Some(url) = &gui_checksum_url {
+        validate_release_url(url)?;
+    }
     Ok(Some(UpdateInfo {
         current,
         available,
         tag: release.tag_name,
         binary_url,
         checksum_url,
+        gui_binary_url,
+        gui_checksum_url,
     }))
+}
+
+fn find_asset(release: &GithubRelease, name: &str) -> Result<String> {
+    release
+        .assets
+        .iter()
+        .find(|candidate| candidate.name == name)
+        .map(|candidate| candidate.browser_download_url.clone())
+        .with_context(|| format!("release {} does not contain {name}", release.tag_name))
+}
+
+fn find_asset_optional(release: &GithubRelease, name: &str) -> Option<String> {
+    release
+        .assets
+        .iter()
+        .find(|candidate| candidate.name == name)
+        .map(|candidate| candidate.browser_download_url.clone())
 }
 
 fn asset_name() -> Result<&'static str> {
     ensure_supported_target()?;
     Ok("cloud-sync-linux-x86_64")
+}
+
+fn gui_asset_name() -> &'static str {
+    "cloud-sync-gui-linux-x86_64"
 }
 
 fn ensure_supported_target() -> Result<()> {
@@ -278,11 +343,15 @@ mod tests {
             "prerelease":false,
             "assets":[
                 {"name":"cloud-sync-linux-x86_64","browser_download_url":"https://github.com/pedroslrey/cloud-sync/releases/download/v99.0.0/cloud-sync-linux-x86_64"},
-                {"name":"cloud-sync-linux-x86_64.sha256","browser_download_url":"https://github.com/pedroslrey/cloud-sync/releases/download/v99.0.0/cloud-sync-linux-x86_64.sha256"}
+                {"name":"cloud-sync-linux-x86_64.sha256","browser_download_url":"https://github.com/pedroslrey/cloud-sync/releases/download/v99.0.0/cloud-sync-linux-x86_64.sha256"},
+                {"name":"cloud-sync-gui-linux-x86_64","browser_download_url":"https://github.com/pedroslrey/cloud-sync/releases/download/v99.0.0/cloud-sync-gui-linux-x86_64"},
+                {"name":"cloud-sync-gui-linux-x86_64.sha256","browser_download_url":"https://github.com/pedroslrey/cloud-sync/releases/download/v99.0.0/cloud-sync-gui-linux-x86_64.sha256"}
             ]
         }"#;
         let update = parse_release(json).unwrap().unwrap();
         assert_eq!(update.available, Version::new(99, 0, 0));
+        assert!(update.gui_binary_url.is_some());
+        assert!(update.gui_checksum_url.is_some());
     }
 
     #[test]

@@ -136,11 +136,25 @@ impl Config {
 }
 
 fn default_device_id() -> String {
-    std::env::var("HOSTNAME")
+    // systemd user services don't export HOSTNAME, so fall back to the
+    // kernel hostname files before giving up.
+    let raw = std::env::var("HOSTNAME")
         .ok()
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "device".into())
-        .chars()
+        .or_else(|| {
+            fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+        })
+        .or_else(|| {
+            fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or_else(|| "device".into());
+    raw.chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || character == '-' {
                 character

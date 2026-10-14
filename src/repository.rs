@@ -37,7 +37,7 @@ pub fn add(
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-    } else if !git::is_repository(&folder) {
+    } else if !is_repo_root(&folder) {
         git::run(&folder, ["init"])?;
         git::run(&folder, ["remote", "add", "origin", remote])?;
         if remote_has_refs {
@@ -80,6 +80,16 @@ pub fn add(
     config.repositories.push(repository.clone());
     config.save(paths)?;
     Ok(repository)
+}
+
+/// True only when `folder` is itself the root of a git repository — a folder
+/// nested inside a parent repo must not count, or `git init`/remote setup
+/// would silently target the parent repository instead.
+fn is_repo_root(folder: &Path) -> bool {
+    let top = git::run(folder, ["rev-parse", "--show-toplevel"])
+        .map(|top| fs::canonicalize(top.trim()).unwrap_or_else(|_| PathBuf::from(top.trim())));
+    let folder = fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+    top.is_ok_and(|top| top == folder)
 }
 
 fn configure_remote(folder: &Path, remote: &str) -> Result<()> {

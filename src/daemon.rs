@@ -20,13 +20,19 @@ pub fn run(config: Config, paths: AppPaths) -> Result<()> {
         },
         notify::Config::default(),
     )?;
+    let mut watched: HashSet<String> = HashSet::new();
     for repository in &config.repositories {
         watcher
             .watch(&repository.path, RecursiveMode::Recursive)
             .with_context(|| format!("could not watch {}", repository.path.display()))?;
-        startup_sync(repository)?;
+        watched.insert(repository.id.clone());
+        if let Err(error) = startup_sync(repository) {
+            eprintln!("{}: startup sync failed: {error:#}", repository.id);
+        }
     }
 
+    let mut config = config;
+    let mut config_mtime = mtime(&paths.config_file);
     let mut state = AppState::load(&paths)?;
     let mut notified_conflicts: HashSet<String> = HashSet::new();
     // Notify about any pre-existing unresolved conflicts on startup.
@@ -38,6 +44,18 @@ pub fn run(config: Config, paths: AppPaths) -> Result<()> {
             Ok(Err(error)) => eprintln!("watch error: {error}"),
             Err(RecvTimeoutError::Disconnected) => anyhow::bail!("filesystem watcher stopped"),
             Err(RecvTimeoutError::Timeout) => {}
+        }
+        // Reload config.toml when it changes so folders added or removed
+        // while the daemon runs take effect without a service restart.
+        if mtime(&paths.config_file) != config_mtime {
+            config_mtime = mtime(&paths.config_file);
+            match Config::load(&paths) {
+                Ok(new_config) => {
+                    reconcile_watches(&mut watcher, &mut watched, &mut dirty, &config, &new_config);
+                    config = new_config;
+                }
+                Err(error) => eprintln!("could not reload config: {error:#}"),
+            }
         }
         for repository in &config.repositories {
             if dirty.get(&repository.id).is_some_and(|changed| {
@@ -71,10 +89,56 @@ pub fn run(config: Config, paths: AppPaths) -> Result<()> {
             if due {
                 if let Err(error) = remote_check(repository, &state) {
                     state.repository_mut(&repository.id).last_error = Some(error.to_string());
+                } else {
+                    state.repository_mut(&repository.id).last_error = None;
                 }
                 state.repository_mut(&repository.id).last_remote_check_at = Some(Utc::now());
                 state.save(&paths)?;
             }
+        }
+    }
+}
+
+fn mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// After a config reload, start watching newly added repositories and stop
+/// watching removed ones. New repositories also get a startup sync.
+fn reconcile_watches(
+    watcher: &mut RecommendedWatcher,
+    watched: &mut HashSet<String>,
+    dirty: &mut HashMap<String, Instant>,
+    old_config: &Config,
+    new_config: &Config,
+) {
+    for repository in &new_config.repositories {
+        if watched.contains(&repository.id) {
+            continue;
+        }
+        match watcher.watch(&repository.path, RecursiveMode::Recursive) {
+            Ok(()) => {
+                watched.insert(repository.id.clone());
+                if let Err(error) = startup_sync(repository) {
+                    eprintln!("{}: startup sync failed: {error:#}", repository.id);
+                }
+            }
+            Err(error) => eprintln!(
+                "{}: could not watch {}: {error:#}",
+                repository.id,
+                repository.path.display()
+            ),
+        }
+    }
+    for repository in &old_config.repositories {
+        let still_present = new_config
+            .repositories
+            .iter()
+            .any(|r| r.id == repository.id);
+        if !still_present {
+            let _ = watcher.unwatch(&repository.path);
+            watched.remove(&repository.id);
+            dirty.remove(&repository.id);
         }
     }
 }

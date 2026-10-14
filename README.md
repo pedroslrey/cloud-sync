@@ -8,6 +8,7 @@ A lightweight Linux synchronization tool for small Git-backed folders such as so
 - Git
 - A stable Rust toolchain with Cargo
 - An existing remote Git repository for each synchronized folder
+- GTK4 development files when building the optional desktop GUI
 
 SSH remotes are recommended for unattended synchronization because SSH keys do not routinely expire.
 
@@ -56,6 +57,69 @@ Open a new terminal after installation. Verify the service:
 systemctl --user status cloud-sync.service
 systemctl --user status cloud-sync.timer
 journalctl --user -u cloud-sync.service -f
+```
+
+## Install the desktop GUI
+
+The optional `cloud-sync-gui` application uses GTK4. Install the GTK4 development package before building it.
+
+Ubuntu or Debian:
+
+```bash
+sudo apt install libgtk-4-dev
+```
+
+Fedora:
+
+```bash
+sudo dnf install gtk4-devel
+```
+
+Arch Linux:
+
+```bash
+sudo pacman -S gtk4
+```
+
+Build both the CLI and GUI from the repository root:
+
+```bash
+cargo build --workspace --release
+```
+
+Install the GUI in the standard per-user binary directory:
+
+```bash
+install -Dm755 target/release/cloud-sync-gui "$HOME/.local/bin/cloud-sync-gui"
+```
+
+`~/.local/bin` must be on `PATH`. Open the desktop application from a terminal with:
+
+```bash
+cloud-sync-gui
+```
+
+The GUI uses the same configuration and state as the background service. It provides panels for monitored folders, unresolved conflicts, Git history, and settings.
+
+List or switch the built-in light and dark themes without opening the window:
+
+```bash
+cloud-sync-gui theme list
+cloud-sync-gui theme get
+cloud-sync-gui theme set light
+cloud-sync-gui theme set dark
+```
+
+The regular CLI can change the same shared theme setting:
+
+```bash
+cloud-sync theme set light
+```
+
+Theme configuration is stored at:
+
+```text
+~/.config/cloud-sync/theme.toml
 ```
 
 ## Adding folders
@@ -326,6 +390,16 @@ The updater:
 5. Stops the user service and atomically replaces the binary.
 6. Restarts the service and verifies that it becomes active.
 7. Automatically restores and restarts the previous binary if activation fails.
+8. Updates `~/.local/bin/cloud-sync-gui` too when it is installed and the release publishes a GUI binary, keeping `cloud-sync-gui.previous` as a backup.
+
+The GUI binary can also be checked and updated directly:
+
+```bash
+cloud-sync-gui update check
+cloud-sync-gui update install
+```
+
+The Settings panel in the GUI has a "Check for updates" button.
 
 Release-based updates currently support Linux x86_64. Other architectures can continue using source updates.
 

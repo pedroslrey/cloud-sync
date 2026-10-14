@@ -13,19 +13,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
       - name: Verify tag version
         run: |
-          test "${GITHUB_REF_NAME#v}" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          for package in cloud-sync cloud-sync-gui; do
+            PACKAGE_VERSION="$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg p "$package" '.packages[] | select(.name == $p) | .version')"
+            test "$TAG_VERSION" = "$PACKAGE_VERSION"
+          done
       - name: Test
         run: cargo test --locked
-      - name: Build release binary
-        run: cargo build --release --locked
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
       - name: Prepare assets
         run: |
           cp target/release/cloud-sync cloud-sync-linux-x86_64
+          cp target/release/cloud-sync-gui cloud-sync-gui-linux-x86_64
           sha256sum cloud-sync-linux-x86_64 > cloud-sync-linux-x86_64.sha256
+          sha256sum cloud-sync-gui-linux-x86_64 > cloud-sync-gui-linux-x86_64.sha256
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -33,5 +44,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             cloud-sync-linux-x86_64 \
             cloud-sync-linux-x86_64.sha256 \
+            cloud-sync-gui-linux-x86_64 \
+            cloud-sync-gui-linux-x86_64.sha256 \
             --generate-notes \
             --verify-tag

@@ -58,9 +58,9 @@ pub fn snapshot(
         if let Some(active) = repository_state.active_session.as_mut() {
             active.last_snapshot_commit = Some(commit.clone());
         }
-        repository_state.last_error = None;
-        state.save(paths)?;
     }
+    state.repository_mut(&repository.id).last_error = None;
+    state.save(paths)?;
     Ok(commit)
 }
 
@@ -456,9 +456,9 @@ fn create_snapshot(
         return Ok(None);
     }
     let message = format!(
-        "cloud-sync snapshot: {} {}",
+        "{} {}",
         config.device_id,
-        Utc::now().to_rfc3339()
+        Utc::now().format("%Y-%m-%d %H:%M")
     );
     let commit = commit_tree(&repository.path, &tree, parent, &message)?;
     git::run(
@@ -616,6 +616,8 @@ fn close_session(
     paths: &AppPaths,
     repository: &RepositoryConfig,
 ) -> Result<()> {
-    state.repository_mut(&repository.id).active_session = None;
+    let repository_state = state.repository_mut(&repository.id);
+    repository_state.active_session = None;
+    repository_state.last_error = None;
     state.save(paths)
 }

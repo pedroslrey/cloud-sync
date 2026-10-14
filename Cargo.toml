@@ -1,6 +1,10 @@
+[workspace]
+members = [".", "gui"]
+resolver = "3"
+
 [package]
 name = "cloud-sync"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]

@@ -8,4 +8,6 @@ pub mod recovery;
 pub mod repository;
 pub mod session;
 pub mod state;
+pub mod status;
+pub mod theme;
 pub mod updater;

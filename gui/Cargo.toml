@@ -1,0 +1,18 @@
+[package]
+name = "cloud-sync-gui"
+version = "0.4.0"
+edition = "2024"
+
+[[bin]]
+name = "cloud-sync-gui"
+path = "src/main.rs"
+
+[dependencies]
+cloud-sync = { path = ".." }
+gtk4 = "0.9"
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.48", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+toml = "0.9.8"
