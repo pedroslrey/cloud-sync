@@ -1,0 +1,7 @@
+[Unit]
+Description=Cloud Sync periodic safety check
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cloud-sync sync-all

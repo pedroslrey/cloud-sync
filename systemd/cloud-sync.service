@@ -1,0 +1,14 @@
+[Unit]
+Description=Cloud Sync file watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cloud-sync daemon
+ExecStop=%h/.local/bin/cloud-sync finalize-all
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
