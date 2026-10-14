@@ -174,23 +174,33 @@ fn restore_creates_backup_and_conflict_can_be_resolved() {
         .success()
     );
     assert!(git(&other, ["push", "origin", "main"]).status.success());
+
+    // Finalization now succeeds even with conflicts; the remote version is
+    // used for conflicting files and the conflict is recorded for later.
+    let finalize = cloud_sync(&config, &state, ["finalize", "work"]);
     assert!(
-        !cloud_sync(&config, &state, ["finalize", "work"])
-            .status
-            .success()
+        finalize.status.success(),
+        "finalize should succeed with deferred conflict: {}",
+        String::from_utf8_lossy(&finalize.stderr)
     );
+    // The remote version should be on disk after finalization.
+    assert_eq!(git_text(&remote, ["show", "main:README"]), "remote");
 
     let conflicts = cloud_sync(&config, &state, ["conflicts"]);
     assert!(conflicts.status.success());
-    let conflict_id = String::from_utf8(conflicts.stdout)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_owned();
+    let conflicts_out = String::from_utf8(conflicts.stdout).unwrap();
+    assert!(
+        !conflicts_out.contains("no unresolved conflicts"),
+        "expected a deferred conflict"
+    );
+    let conflict_id = conflicts_out.split_whitespace().next().unwrap().to_owned();
     let shown = cloud_sync(&config, &state, ["conflict", "show", &conflict_id]);
     assert!(shown.status.success());
-    assert!(String::from_utf8(shown.stdout).unwrap().contains("README"));
+    let shown_out = String::from_utf8(shown.stdout).unwrap();
+    assert!(shown_out.contains("README"));
+    assert!(shown_out.contains("cloud-sync conflict resolve"));
+
+    // Resolve using local — should replace the remote version with the local one.
     assert!(
         cloud_sync(
             &config,

@@ -198,7 +198,16 @@ fn run() -> Result<()> {
             let repo = config.repository(&selector)?.clone();
             let mut state = AppState::load(&paths)?;
             match session::finalize(&config, &mut state, &paths, &repo)? {
-                Some(commit) => println!("finalized {commit}"),
+                Some(result) => {
+                    println!("finalized {}", result.commit);
+                    if let Some(id) = result.conflict_id {
+                        eprintln!(
+                            "warning: conflict detected; remote version used for now\n\
+                             run: cloud-sync conflicts\n\
+                             then: cloud-sync conflict resolve {id} <local|remote|newest|keep-both>"
+                        );
+                    }
+                }
                 None => println!("no session changes"),
             }
         }
@@ -384,12 +393,24 @@ fn sync_all(config: &Config, paths: &AppPaths) -> Result<()> {
 fn finalize_all(config: &Config, paths: &AppPaths) -> Result<()> {
     let mut state = AppState::load(paths)?;
     let mut failures = Vec::new();
+    let mut deferred_conflicts = Vec::new();
     for repo in &config.repositories {
         match session::finalize(config, &mut state, paths, repo) {
-            Ok(Some(commit)) => println!("{}: finalized {commit}", repo.id),
+            Ok(Some(result)) => {
+                println!("{}: finalized {}", repo.id, result.commit);
+                if let Some(id) = result.conflict_id {
+                    deferred_conflicts.push((repo.id.clone(), id));
+                }
+            }
             Ok(None) => println!("{}: no session changes", repo.id),
             Err(error) => failures.push(format!("{}: {error:#}", repo.id)),
         }
+    }
+    for (repo_id, conflict_id) in &deferred_conflicts {
+        eprintln!(
+            "warning: {repo_id} has a deferred conflict ({conflict_id})\n\
+             run: cloud-sync conflict resolve {conflict_id} <local|remote|newest|keep-both>"
+        );
     }
     if failures.is_empty() {
         Ok(())
@@ -434,6 +455,22 @@ fn status(config: &Config, paths: &AppPaths, selector: Option<&str>) -> Result<(
             }
         } else {
             println!("  session: none");
+        }
+        let unresolved: Vec<_> = state
+            .conflicts
+            .values()
+            .filter(|c| c.repository_id == repo.id && c.resolved_at.is_none())
+            .collect();
+        if !unresolved.is_empty() {
+            println!("  conflicts: {}", unresolved.len());
+            for c in &unresolved {
+                let files = if c.paths.is_empty() {
+                    "unknown paths".into()
+                } else {
+                    c.paths.join(", ")
+                };
+                println!("    {} — {}", c.id, files);
+            }
         }
     }
     Ok(())

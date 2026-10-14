@@ -69,7 +69,7 @@ pub fn finalize(
     state: &mut AppState,
     paths: &AppPaths,
     repository: &RepositoryConfig,
-) -> Result<Option<String>> {
+) -> Result<Option<FinalizeResult>> {
     let _ = snapshot(config, state, paths, repository)?;
     let _lock = repository_lock(paths, &repository.id)?;
     let session = match state
@@ -122,31 +122,46 @@ pub fn finalize(
         close_session(state, paths, repository)?;
         return Ok(None);
     }
-    let tree = if remote_base == session.base_commit {
-        git::run(
-            &repository.path,
-            ["rev-parse", &format!("{session_commit}^{{tree}}")],
-        )?
+    let (tree, conflict_id) = if remote_base == session.base_commit {
+        (
+            git::run(
+                &repository.path,
+                ["rev-parse", &format!("{session_commit}^{{tree}}")],
+            )?,
+            None,
+        )
     } else if session_commit == session.base_commit {
-        git::run(
-            &repository.path,
-            ["rev-parse", &format!("{remote_base}^{{tree}}")],
-        )?
+        (
+            git::run(
+                &repository.path,
+                ["rev-parse", &format!("{remote_base}^{{tree}}")],
+            )?,
+            None,
+        )
     } else {
-        merge_tree_or_record(
+        let result = merge_tree_or_record(
             state,
             paths,
             repository,
             &session.base_commit,
             &session_commit,
             &remote_base,
-        )?
+        )?;
+        (result.tree, result.conflict_id)
     };
-    let message = format!(
-        "cloud-sync: session {} on {}",
-        session.started_at.format("%Y-%m-%d %H:%M"),
-        config.device_id
-    );
+    let message = if conflict_id.is_some() {
+        format!(
+            "cloud-sync: session {} on {} (conflicts deferred)",
+            session.started_at.format("%Y-%m-%d %H:%M"),
+            config.device_id
+        )
+    } else {
+        format!(
+            "cloud-sync: session {} on {}",
+            session.started_at.format("%Y-%m-%d %H:%M"),
+            config.device_id
+        )
+    };
     let final_commit = commit_tree(&repository.path, &tree, &remote_base, &message)?;
     if !git::succeeds(&repository.path, ["diff", "--quiet", &session_commit, "--"]) {
         bail!("tracked files changed during finalization; session preserved for another attempt");
@@ -186,7 +201,27 @@ pub fn finalize(
     let _ = git::run(&repository.path, ["branch", "-D", &session.branch]);
     close_session(state, paths, repository)?;
     let _ = cleanup_completed(config, repository);
-    Ok(Some(final_commit))
+    Ok(Some(FinalizeResult {
+        commit: final_commit,
+        conflict_id,
+    }))
+}
+
+/// Result of a successful finalization.
+pub struct FinalizeResult {
+    pub commit: String,
+    /// If set, a merge conflict was deferred. The base branch uses the remote
+    /// version for conflicting files; run `cloud-sync conflict resolve` to
+    /// merge local changes back in.
+    pub conflict_id: Option<String>,
+}
+
+/// Result of a three-way merge: either clean or conflicted.
+pub struct MergeResult {
+    /// The merged tree (conflicts resolved using remote).
+    pub tree: String,
+    /// If Some, a conflict was recorded; finalization should still proceed.
+    pub conflict_id: Option<String>,
 }
 
 fn merge_tree_or_record(
@@ -196,7 +231,7 @@ fn merge_tree_or_record(
     base: &str,
     local: &str,
     remote: &str,
-) -> Result<String> {
+) -> Result<MergeResult> {
     let output = Command::new("git")
         .arg("-C")
         .arg(&repository.path)
@@ -205,11 +240,15 @@ fn merge_tree_or_record(
         .context("could not execute git merge-tree")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if output.status.success() {
-        return stdout
+        let tree = stdout
             .lines()
             .next()
             .map(str::to_owned)
-            .context("git did not produce a reconciled tree");
+            .context("git did not produce a reconciled tree")?;
+        return Ok(MergeResult {
+            tree,
+            conflict_id: None,
+        });
     }
     let mut conflict_paths = stdout
         .lines()
@@ -251,7 +290,16 @@ fn merge_tree_or_record(
             id
         });
     state.save(paths)?;
-    bail!("merge conflict recorded as {id}; run cloud-sync conflict show {id}")
+    // Use the remote tree for conflicting files so finalization can proceed.
+    // The local version is preserved on the session/completed branch for later resolution.
+    let remote_tree = git::run(
+        &repository.path,
+        ["rev-parse", &format!("{remote}^{{tree}}")],
+    )?;
+    Ok(MergeResult {
+        tree: remote_tree,
+        conflict_id: Some(id),
+    })
 }
 
 fn cleanup_completed(config: &Config, repository: &RepositoryConfig) -> Result<()> {

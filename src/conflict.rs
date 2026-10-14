@@ -17,26 +17,39 @@ pub enum Resolution {
 }
 
 pub fn list(state: &AppState, repository: Option<&str>) -> String {
-    state
+    let conflicts: Vec<_> = state
         .conflicts
         .values()
         .filter(|conflict| conflict.resolved_at.is_none())
         .filter(|conflict| repository.is_none_or(|id| id == conflict.repository_id))
+        .collect();
+    if conflicts.is_empty() {
+        return String::new();
+    }
+    conflicts
+        .iter()
         .map(|conflict| {
+            let files = if conflict.paths.is_empty() {
+                "  unknown paths".into()
+            } else {
+                conflict
+                    .paths
+                    .iter()
+                    .map(|p| format!("  {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             format!(
-                "{}  {}  {}  {}",
+                "{} ({})\n  detected: {}\n{}\n  resolve: cloud-sync conflict resolve {} <local|remote|newest|keep-both>",
                 conflict.id,
                 conflict.repository_id,
-                conflict.detected_at.to_rfc3339(),
-                if conflict.paths.is_empty() {
-                    "unknown paths".into()
-                } else {
-                    conflict.paths.join(", ")
-                }
+                conflict.detected_at.format("%Y-%m-%d %H:%M"),
+                files,
+                conflict.id,
             )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n\n")
 }
 
 pub fn show(config: &Config, state: &AppState, id: &str) -> Result<String> {
@@ -45,24 +58,39 @@ pub fn show(config: &Config, state: &AppState, id: &str) -> Result<String> {
         .get(id)
         .with_context(|| format!("unknown conflict: {id}"))?;
     let repository = config.repository(&conflict.repository_id)?;
+    let paths_display = if conflict.paths.is_empty() {
+        "unknown".to_owned()
+    } else {
+        conflict
+            .paths
+            .iter()
+            .map(|p| format!("  {p}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let status = if conflict.resolved_at.is_some() {
+        format!(
+            "resolved ({})",
+            conflict.resolution.as_deref().unwrap_or("unknown")
+        )
+    } else {
+        "unresolved — remote version is active on disk".into()
+    };
     let mut output = format!(
-        "Conflict: {}\nRepository: {}\nDetected: {}\nBase: {}\nLocal: {}\nRemote: {}\nPaths: {}\n",
-        conflict.id,
+        "Conflict {id}\n\
+         Repository: {}\n\
+         Status: {status}\n\
+         Detected: {}\n\
+         Conflicting files:\n\
+         {paths_display}\n",
         conflict.repository_id,
-        conflict.detected_at.to_rfc3339(),
-        conflict.base_commit,
-        conflict.local_commit,
-        conflict.remote_commit,
-        if conflict.paths.is_empty() {
-            "unknown".into()
-        } else {
-            conflict.paths.join(", ")
-        }
+        conflict.detected_at.format("%Y-%m-%d %H:%M"),
     );
     let mut args = vec![
         "diff",
         "--no-ext-diff",
         "--no-color",
+        "--stat",
         &conflict.remote_commit,
         &conflict.local_commit,
     ];
@@ -70,11 +98,39 @@ pub fn show(config: &Config, state: &AppState, id: &str) -> Result<String> {
         args.push("--");
         args.extend(conflict.paths.iter().map(String::as_str));
     }
-    let diff = git::run(&repository.path, args)?;
-    if !diff.is_empty() {
+    let stat = git::run(&repository.path, args.clone()).unwrap_or_default();
+    if !stat.is_empty() {
+        output.push_str("\nChanges (remote -> local):\n");
+        output.push_str(&stat);
         output.push('\n');
+    }
+    // Full diff
+    args[3] = "--";
+    let mut diff_args = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        &conflict.remote_commit,
+        &conflict.local_commit,
+    ];
+    if !conflict.paths.is_empty() {
+        diff_args.push("--");
+        diff_args.extend(conflict.paths.iter().map(String::as_str));
+    }
+    let diff = git::run(&repository.path, diff_args).unwrap_or_default();
+    if !diff.is_empty() {
+        output.push_str("\nDiff:\n");
         output.push_str(&diff);
         output.push('\n');
+    }
+    if conflict.resolved_at.is_none() {
+        output.push_str(&format!(
+            "\nTo resolve, run one of:\n\
+             \n  cloud-sync conflict resolve {id} local     # use your version\
+             \n  cloud-sync conflict resolve {id} remote    # keep the current (remote) version\
+             \n  cloud-sync conflict resolve {id} newest    # use whichever was edited last\
+             \n  cloud-sync conflict resolve {id} keep-both # keep remote, save local as .cloud-sync-local\n"
+        ));
     }
     Ok(output)
 }
@@ -99,21 +155,16 @@ pub fn resolve(
         &repository.path,
         ["fetch", &repository.remote_name, "--prune"],
     )?;
-    let current_remote = git::run(
+    // The base branch may have advanced past the original conflict commits
+    // because finalization now succeeds with deferred conflicts. We resolve
+    // on top of the current base head.
+    let current_base = git::run(
         &repository.path,
         [
             "rev-parse",
-            &format!(
-                "refs/remotes/{}/{}",
-                repository.remote_name, repository.base_branch
-            ),
+            &format!("refs/heads/{}", repository.base_branch),
         ],
     )?;
-    if current_remote != conflict.remote_commit {
-        bail!(
-            "remote base advanced after conflict detection; retry finalization to create an updated conflict record"
-        );
-    }
     let selected = match resolution {
         Resolution::Newest => {
             if commit_time(&repository, &conflict.local_commit)?
@@ -126,6 +177,18 @@ pub fn resolve(
         }
         other => other,
     };
+    // If choosing remote, the base branch already contains the remote version
+    // from the deferred finalization — nothing to change on disk.
+    if matches!(selected, Resolution::Remote) {
+        let record = state
+            .conflicts
+            .get_mut(id)
+            .context("conflict state disappeared")?;
+        record.resolved_at = Some(Utc::now());
+        record.resolution = Some(resolution_name(resolution).into());
+        state.save(paths)?;
+        return Ok(current_base);
+    }
     let recovery = format!(
         "cloud-sync/recovery/{}/conflict-{}-local",
         config.device_id, id
@@ -138,14 +201,14 @@ pub fn resolve(
             &repository.path,
             ["branch", &recovery, &conflict.local_commit],
         )?;
-        git::run(
+        let _ = git::run(
             &repository.path,
             [
                 "push",
                 &repository.remote_name,
                 &format!("{recovery}:{recovery}"),
             ],
-        )?;
+        );
     }
     let tree = resolved_tree(paths, &repository, &conflict, selected)?;
     let message = format!(
@@ -154,14 +217,7 @@ pub fn resolve(
     );
     let commit = git::run_with_env(
         &repository.path,
-        [
-            "commit-tree",
-            &tree,
-            "-p",
-            &conflict.remote_commit,
-            "-m",
-            &message,
-        ],
+        ["commit-tree", &tree, "-p", &current_base, "-m", &message],
         &[
             ("GIT_AUTHOR_NAME", SYNC_AUTHOR_NAME),
             ("GIT_AUTHOR_EMAIL", SYNC_AUTHOR_EMAIL),
@@ -175,7 +231,7 @@ pub fn resolve(
             "update-ref",
             &format!("refs/heads/{}", repository.base_branch),
             &commit,
-            &conflict.base_commit,
+            &current_base,
         ],
     )?;
     git::run(&repository.path, ["reset", "--hard", &commit])?;
