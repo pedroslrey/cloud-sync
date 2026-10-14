@@ -303,14 +303,40 @@ Completion includes commands, options, shells, and conflict-resolution choices. 
 
 ## Updating
 
-Finalize sessions and stop the daemon before updating:
+Cloud-sync checks GitHub Releases daily. When a newer version is available, it sends a desktop notification when `notify-send` is installed. Update checks never install software automatically.
+
+Check manually:
+
+```bash
+cloud-sync update check
+```
+
+Install the latest release:
+
+```bash
+cloud-sync update install
+```
+
+The updater:
+
+1. Finalizes all active synchronization sessions.
+2. Downloads the Linux x86_64 release binary and its SHA-256 file.
+3. Rejects unexpected download locations or checksum mismatches.
+4. Saves the currently installed binary as `~/.local/bin/cloud-sync.previous`.
+5. Stops the user service and atomically replaces the binary.
+6. Restarts the service and verifies that it becomes active.
+7. Automatically restores and restarts the previous binary if activation fails.
+
+Release-based updates currently support Linux x86_64. Other architectures can continue using source updates.
+
+To update from source instead, finalize sessions and stop the daemon:
 
 ```bash
 cloud-sync finalize-all
 systemctl --user stop cloud-sync.service
 ```
 
-Update, verify, and rebuild from the cloud-sync source checkout:
+Then update, verify, rebuild, and reinstall from the source checkout:
 
 ```bash
 git pull --ff-only
@@ -318,13 +344,12 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
+./target/release/cloud-sync install-service
 ```
 
-Reinstall and restart:
+Verify the service afterward:
 
 ```bash
-./target/release/cloud-sync install-service
 systemctl --user status cloud-sync.service
+systemctl --user status cloud-sync-update-check.timer
 ```
-
-There is currently no automatic updater. Manual updates make it possible to verify changes before replacing the synchronization daemon.

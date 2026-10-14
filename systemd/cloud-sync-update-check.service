@@ -1,0 +1,7 @@
+[Unit]
+Description=Check for Cloud Sync updates
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cloud-sync update check --notify

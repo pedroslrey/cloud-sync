@@ -6,7 +6,7 @@ use cloud_sync::paths::AppPaths;
 use cloud_sync::repository;
 use cloud_sync::session;
 use cloud_sync::state::AppState;
-use cloud_sync::{conflict, daemon, recovery};
+use cloud_sync::{conflict, daemon, recovery, updater};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -79,6 +79,10 @@ enum Commands {
     Completions {
         shell: Shell,
     },
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommands,
+    },
     ConfigPath,
     Daemon,
     InstallService,
@@ -119,6 +123,15 @@ enum ConflictChoice {
     Remote,
     Newest,
     KeepBoth,
+}
+
+#[derive(Subcommand)]
+enum UpdateCommands {
+    Check {
+        #[arg(long)]
+        notify: bool,
+    },
+    Install,
 }
 
 fn main() {
@@ -317,6 +330,33 @@ fn run() -> Result<()> {
                 &mut std::io::stdout(),
             );
         }
+        Commands::Update { command } => match command {
+            UpdateCommands::Check { notify } => match updater::check()? {
+                Some(update) => {
+                    println!(
+                        "update available: {} -> {} ({})",
+                        update.current, update.available, update.tag
+                    );
+                    if notify {
+                        updater::notify_available(&update);
+                    }
+                }
+                None => println!("cloud-sync is up to date"),
+            },
+            UpdateCommands::Install => match updater::check()? {
+                Some(update) => {
+                    finalize_all(&config, &paths)?;
+                    let installed = updater::install(&update, &paths)?;
+                    println!(
+                        "updated cloud-sync from {} to {} at {}",
+                        update.current,
+                        update.available,
+                        installed.display()
+                    );
+                }
+                None => println!("cloud-sync is already up to date"),
+            },
+        },
         Commands::ConfigPath => println!("{}", paths.config_file.display()),
         Commands::Daemon => daemon::run(config, paths)?,
         Commands::InstallService => install_service()?,
@@ -423,13 +463,27 @@ fn install_service() -> Result<()> {
             "cloud-sync-sync.service",
             include_str!("../systemd/cloud-sync-sync.service"),
         ),
+        (
+            "cloud-sync-update-check.service",
+            include_str!("../systemd/cloud-sync-update-check.service"),
+        ),
+        (
+            "cloud-sync-update-check.timer",
+            include_str!("../systemd/cloud-sync-update-check.timer"),
+        ),
     ];
     for (name, content) in units {
         fs::write(unit_dir.join(name), content)?;
     }
     install_completion(&home)?;
     systemctl(["daemon-reload"])?;
-    systemctl(["enable", "--now", "cloud-sync.service", "cloud-sync.timer"])?;
+    systemctl([
+        "enable",
+        "--now",
+        "cloud-sync.service",
+        "cloud-sync.timer",
+        "cloud-sync-update-check.timer",
+    ])?;
     println!("installed and started systemd user units");
     Ok(())
 }
