@@ -6,8 +6,9 @@ use crate::state::AppState;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,9 @@ pub fn run(config: Config, paths: AppPaths) -> Result<()> {
     }
 
     let mut state = AppState::load(&paths)?;
+    let mut notified_conflicts: HashSet<String> = HashSet::new();
+    // Notify about any pre-existing unresolved conflicts on startup.
+    notify_new_conflicts(&state, &mut notified_conflicts);
     let mut dirty: HashMap<String, Instant> = HashMap::new();
     loop {
         match receiver.recv_timeout(Duration::from_secs(1)) {
@@ -47,6 +51,7 @@ pub fn run(config: Config, paths: AppPaths) -> Result<()> {
                 match session::snapshot(&config, &mut state, &paths, repository) {
                     Ok(_) => {
                         dirty.remove(&repository.id);
+                        notify_new_conflicts(&state, &mut notified_conflicts);
                     }
                     Err(error) => {
                         state.repository_mut(&repository.id).last_error = Some(error.to_string());
@@ -121,4 +126,25 @@ fn remote_check(repository: &RepositoryConfig, state: &AppState) -> Result<()> {
         git::run(&repository.path, ["merge", "--ff-only", &remote])?;
     }
     Ok(())
+}
+
+/// Send a single desktop notification if there are unresolved conflicts that
+/// haven't been notified yet during this daemon session.
+fn notify_new_conflicts(state: &AppState, notified: &mut HashSet<String>) {
+    let unresolved = state.unresolved_conflict_ids();
+    let new: Vec<_> = unresolved.difference(notified).collect();
+    if new.is_empty() {
+        return;
+    }
+    let count = unresolved.len();
+    let body = if count == 1 {
+        "1 unresolved conflict. Run: cloud-sync conflicts".into()
+    } else {
+        format!("{count} unresolved conflicts. Run: cloud-sync conflicts")
+    };
+    let _ = Command::new("notify-send")
+        .args(["Cloud Sync", &body])
+        .status();
+    // Mark all current unresolved conflicts as notified so we don't repeat.
+    notified.extend(unresolved);
 }

@@ -3,7 +3,7 @@ use crate::paths::AppPaths;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -65,5 +65,13 @@ impl AppState {
 
     pub fn repository_mut(&mut self, id: &str) -> &mut RepositoryState {
         self.repositories.entry(id.to_owned()).or_default()
+    }
+
+    pub fn unresolved_conflict_ids(&self) -> HashSet<String> {
+        self.conflicts
+            .values()
+            .filter(|c| c.resolved_at.is_none())
+            .map(|c| c.id.clone())
+            .collect()
     }
 }
